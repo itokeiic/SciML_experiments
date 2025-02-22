@@ -8,10 +8,6 @@ import matplotlib.pyplot as plt
 torch.autograd.set_detect_anomaly(True)
 #TODO: DUSPSA need to be modeled as a torch.nn
 #TODO: train_spsa needs to be implemented as incremental learning loop
-init_val = 0.01 #initial value of stepsize parameter a
-itr = 10 # number of iteration for spsa and number of increment, i.e., a is a torch.nn.parameters array of size itr
-bs = 20 # mini batch size
-train_itr = 50 # train iteration for optimizing a using Adam.
 
 def func(x, q=8):
     return x[0]**2 + q*x[1]**2
@@ -144,7 +140,7 @@ def spsa(x0, func, bounds=None, alpha=0.602, gamma=0.101, deltax_0=0.1, a=None, 
     # push!(historyx, copy(x))
     # print("number of function evaluation: ", Nfeval)
     # return x, y, history, historyx, Nfeval
-    return x
+    return x,y
     
 class DUSPSA(nn.Module):
     def __init__(self, func, num_itr, Npar = 2):
@@ -156,8 +152,10 @@ class DUSPSA(nn.Module):
         
     def forward(self, num_itr, bs): #number of increments and batch size
         X0 = (torch.rand(bs, self.Npar)*20.0 - 10.0)
-        s = [spsa(x0, self.func, a=self.a, c=self.c, maxiter = num_itr) for x0 in X0]        
-        return torch.stack(s, dim=0)
+        r = [spsa(x0, self.func, a=self.a, c=self.c, maxiter = num_itr, adaptive_step=False) for x0 in X0] 
+        s = [el[0] for el in r]
+        y = [el[1] for el in r]
+        return torch.stack(s, dim=0), torch.stack(y, dim=0)
 
 class TrainASPSA(nn.Module):
     def __init__(self, func, num_itr, Npar = 2):
@@ -167,8 +165,10 @@ class TrainASPSA(nn.Module):
         
     def forward(self, num_itr, bs):
         X0 = (torch.rand(bs, self.Npar)*20.0 - 10.0) # ランダムな初期点を設定
-        s = [spsa(x0, self.func, a=None, maxiter = num_itr, adaptive_step=True) for x0 in X0]
-        return torch.stack(s, dim=0)
+        r = [spsa(x0, self.func, a=None, maxiter = num_itr, adaptive_step=True) for x0 in X0]
+        s = [el[0] for el in r]
+        y = [el[1] for el in r]
+        return torch.stack(s, dim=0), torch.stack(y, dim=0)
 # def train_spsa(opt, eta, max_itr, train_itr):
     # eta = torch.tensor(eta, requires_grad=True)
     # l = []
@@ -184,78 +184,95 @@ class TrainASPSA(nn.Module):
         # opt.step()
     # return l
 
-model=DUSPSA(func, itr, Npar=2)
-opt = optim.Adam(model.parameters(), lr=0.01)
-loss_func = nn.MSELoss()
-solution = torch.tensor([[0.0,0.0]]).repeat(bs,1)
-l=[]
-for gen in range(itr):
-    for i in range(train_itr):
-        opt.zero_grad()
-        s=model(gen+1, bs)
-        loss = loss_func(s, solution)
-        loss.backward()
-        opt.step()
-    print(gen, loss.item())
-    l.append(loss.item())
+if __name__ == "__main__":
+    init_val = 0.01 #initial value of stepsize parameter a
+    itr = 10 # number of iteration for spsa and number of increment, i.e., a is a torch.nn.parameters array of size itr
+    bs = 20 # mini batch size
+    train_itr = 50 # train iteration for optimizing a using Adam.
 
-X0 = (torch.rand(bs, 2)*20.0 - 10.0)
-s = [spsa(x0, func, a=None, maxiter = itr, adaptive_step=True) for x0 in X0]
-loss = loss_func(torch.stack(s, dim=0), solution)
-print ("original_a_spsa: ", loss.item())
+    model=DUSPSA(func, itr, Npar=2)
+    opt = optim.Adam(model.parameters(), lr=0.01)
+    loss_func = nn.MSELoss()
+    solution = torch.tensor([[0.0,0.0]]).repeat(bs,1)
+    y_opt = torch.tensor([0.0]).repeat(bs)
+    print ("y_opt = ",y_opt)
+    l=[]
+    for gen in range(itr):
+        for i in range(train_itr):
+            opt.zero_grad()
+            s,y = model(gen+1, bs)
+            #print ("s, y = ",s, y)
+            obj_loss = loss_func(y, y_opt)
+            obj_loss.backward()
+            loss = loss_func(s, solution)
+            # loss.backward()
+            opt.step()
+        print(gen, loss.item(),obj_loss.item())
+        l.append(loss.item())
 
-aspsa_model = TrainASPSA(func, itr, Npar=2)
-## trained DUSPSA model
-bs = 100
-solution = torch.tensor([[0.0, 0.0]]).repeat(bs,1) #解
-plt.figure()
-with torch.no_grad():
-    for i in range(1): 
-        norm_list = []
-        itr_list = []
-        for i in range(itr):
-            s_hat = model(i, bs)
-            err = (torch.norm(solution - s_hat)**2).item()/bs
-            norm_list.append(math.log10(err))
-            itr_list.append(i)
-        plt.plot(itr_list, norm_list, color="red", label="DUSPSA",marker='o')
-## normal ASPSA
+    X0 = (torch.rand(bs, 2)*20.0 - 10.0)
+    r = [spsa(x0, func, a=None, maxiter = itr, adaptive_step=True) for x0 in X0]
+    s = [el[0] for el in r]
+    y = [el[1] for el in r]
+    loss = loss_func(torch.stack(s, dim=0), solution)
+    obj_loss = loss_func(torch.stack(y, dim=0), y_opt)
+    print ("original_a_spsa: ", loss.item(), obj_loss.item())
 
-norm_list = []
-itr_list = []
-for i in range(itr):
-    s_hat = aspsa_model(i, bs)
-    err = (torch.norm(solution - s_hat)**2).item()/bs
-    norm_list.append(math.log10(err))
-    itr_list.append(i)
+    aspsa_model = TrainASPSA(func, itr, Npar=2)
+    ## trained DUSPSA model
+    bs = 100
+    solution = torch.tensor([[0.0, 0.0]]).repeat(bs,1) #解
+    y_opt = torch.tensor([0.0]).repeat(bs)
+    plt.figure()
+    with torch.no_grad():
+        for i in range(1): 
+            norm_list = []
+            itr_list = []
+            for i in range(itr):
+                s_hat, y_hat = model(i, bs)
+                err = (torch.norm(y_opt - y_hat)**2).item()/bs
+                #err = (torch.norm(solution - s_hat)**2).item()/bs
+                norm_list.append(math.log10(err))
+                itr_list.append(i)
+            plt.plot(itr_list, norm_list, color="red", label="DUSPSA",marker='o')
+    ## normal ASPSA
 
-plt.plot(itr_list, norm_list, color="green", label="A_SPSA",marker='o')
-plt.title("Error curves")
-plt.grid()
-plt.xlabel("iteration")
-plt.ylabel("log10 of squared error")
-plt.legend()
+    norm_list = []
+    itr_list = []
+    for i in range(itr):
+        s_hat, y_hat = aspsa_model(i, bs)
+        err = (torch.norm(y_opt - y_hat)**2).item()/bs
+        # err = (torch.norm(solution - s_hat)**2).item()/bs
+        norm_list.append(math.log10(err))
+        itr_list.append(i)
 
-g = model.a.to("cpu")
-h = model.c.to("cpu")
-gval = g.detach().numpy()
-gval = gval[0:itr]
-hval = h.detach().numpy()
-hval = hval[0:itr]
+    plt.plot(itr_list, norm_list, color="green", label="A_SPSA",marker='o')
+    plt.title("Error curves")
+    plt.grid()
+    plt.xlabel("iteration")
+    plt.ylabel("log10 of squared error")
+    plt.legend()
 
-ind = np.linspace(0,itr-1,itr)
-plt.figure()
-plt.plot(ind, gval,label="a",marker='o')
-plt.plot(ind, hval,label="c",marker='o')
-plt.xlabel("index t")
-plt.ylabel("parameter values")
-plt.grid()
-plt.legend()
-plt.show()
-# l = train_spsa(opt, eta, max_itr, train_itr)
-# print("a: ", l)
+    g = model.a.to("cpu")
+    h = model.c.to("cpu")
+    gval = g.detach().numpy()
+    gval = gval[0:itr]
+    hval = h.detach().numpy()
+    hval = hval[0:itr]
 
-# # Plotting (using matplotlib)
-# import matplotlib.pyplot as plt
-# plt.plot(range(1, train_itr + 1), l, xlabel="Iteration", ylabel="a", lw=2, color='black')
-# plt.show()
+    ind = np.linspace(0,itr-1,itr)
+    plt.figure()
+    plt.plot(ind, gval,label="a",marker='o')
+    plt.plot(ind, hval,label="c",marker='o')
+    plt.xlabel("index t")
+    plt.ylabel("parameter values")
+    plt.grid()
+    plt.legend()
+    plt.show()
+    # l = train_spsa(opt, eta, max_itr, train_itr)
+    # print("a: ", l)
+
+    # # Plotting (using matplotlib)
+    # import matplotlib.pyplot as plt
+    # plt.plot(range(1, train_itr + 1), l, xlabel="Iteration", ylabel="a", lw=2, color='black')
+    # plt.show()
